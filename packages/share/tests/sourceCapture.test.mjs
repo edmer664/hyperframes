@@ -367,3 +367,17 @@ test("editable source omits credential stores and unrecognized hidden files whil
     problems: [{ path: "notes.txt", problem: "symlink" }],
   });
 });
+
+test("a host can use the package snapshot entry point for private names and strict ignore rules", async (t) => {
+  const { isPrivateSourcePath, privateSourceSpelling, readSourceIgnore } =
+    await import("@hyperframes/share/projectSnapshot.mjs");
+  const root = await project({ ".hyperframesignore": "scratch/\n" });
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const spelled = "Assets/Ｓervice-Account.json";
+  assert.equal(privateSourceSpelling(spelled), "assets/service-account.json");
+  assert.equal(isPrivateSourcePath(spelled), true);
+  assert.equal(isPrivateSourcePath("assets/voice.wav"), false);
+  const ignored = await readSourceIgnore(root);
+  assert.equal(ignored("scratch/draft.txt"), true);
+  assert.equal(ignored("assets/voice.wav"), false);
+});
