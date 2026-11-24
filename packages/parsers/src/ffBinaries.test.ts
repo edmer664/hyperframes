@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import {
   type PathLike,
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -11,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join, resolve, win32 } from "node:path";
+import { delimiter, dirname, join, resolve, win32 } from "node:path";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 type FfBinariesModule = typeof import("./ffBinaries.js");
@@ -565,7 +566,19 @@ describe("assertLiteralMediaInput", () => {
       "/job/x%*/still.png",
       "/job/x%[ab]/still.png",
       "/job/x%{a,b}/still.png",
+      "/job/x%3*/still.png",
+      "/job/x%03?.png",
+      "/job/x%1{a,b}.png",
       "file:/job/decoy%d.png",
+      // A "%" and a wildcard that are not next to each other, in either order or in different folders.
+      "/job/credentials.json%a{.xface",
+      "/job/x{%ay.png",
+      "/job/x%a*y.png",
+      "/job/x?%ay.png",
+      "/job/x%a[y].png",
+      "/job/x%a/y{.png",
+      "/job/x{/y%a.png",
+      "/job/x{%.png",
     ]) {
       expect(() => assertLiteralMediaInput(path), path).toThrow(/pattern of other files/);
     }
@@ -588,7 +601,9 @@ describe("assertLiteralMediaInput", () => {
       "/job/My%20Video.mp4",
       "/job/a%2D.png",
       "C:\\job\\clip.mp4",
+      "/job/x{y}.png",
       "https://cdn.example/a%2d.png",
+      "https://cdn.example/a%20{b}.png",
     ]) {
       expect(() => assertLiteralMediaInput(path), path).not.toThrow();
     }
@@ -625,6 +640,128 @@ describe("assertLiteralMediaInput", () => {
   });
 });
 
+describe("assertLiteralMediaInput against the installed ffprobe", () => {
+  it("lets through only names ffprobe opens as the one file written", async () => {
+    vi.resetModules();
+    vi.doUnmock("node:fs");
+    vi.doUnmock("node:child_process");
+    const { assertLiteralMediaInput, findFfBinary } = await importFresh();
+    const [ffmpeg, ffprobe] = [findFfBinary("ffmpeg"), findFfBinary("ffprobe")];
+    if (!ffmpeg || !ffprobe) return;
+    const dir = mkdtempSync(join(tmpdir(), "hf-image2-forms-"));
+    onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
+    const still = (size: number, at: string) =>
+      spawnSync(ffmpeg, [
+        ...["-v", "error", "-y", "-f", "lavfi", "-i", `color=red:s=${size}x${size}`],
+        ...["-frames:v", "1", "-c:v", "png", "-f", "image2", "-update", "1", at],
+      ]);
+    const [small, big] = [join(dir, "small.png"), join(dir, "big.png")];
+    still(16, small);
+    still(32, big);
+    if (!existsSync(small) || !existsSync(big)) return;
+    const width = (path: string) =>
+      spawnSync(
+        ffprobe,
+        [
+          "-v",
+          "error",
+          "-select_streams",
+          "v:0",
+          "-show_entries",
+          "stream=width",
+          "-of",
+          "csv=p=0",
+          "--",
+          path,
+        ],
+        { encoding: "utf8" },
+      ).stdout.trim();
+    const tails = "!#$&'()*+,-.:;<=>?@[]^_`{|}~ adisx%";
+    const forms = ["", "1", "03"].flatMap((digits) =>
+      [...tails].map((tail) => `%${digits}${tail}`),
+    );
+    const misread: string[] = [];
+    forms.forEach((form, index) => {
+      const at = join(dir, `case${index}`);
+      mkdirSync(at);
+      for (const decoy of ["x y.png", "x!y.png", "x0y.png", "x1y.png", "x001y.png"]) {
+        copyFileSync(big, join(at, decoy));
+      }
+      const literal = join(at, `x${form}y.png`);
+      copyFileSync(small, literal);
+      let refused = false;
+      try {
+        assertLiteralMediaInput(literal);
+      } catch {
+        refused = true;
+      }
+      if (!refused && width(literal) !== "16") misread.push(form);
+    });
+    expect(misread).toEqual([]);
+  }, 60_000);
+
+  it("lets through no name where a stray % and a wildcard make ffprobe open a shorter one", async () => {
+    vi.resetModules();
+    vi.doUnmock("node:fs");
+    vi.doUnmock("node:child_process");
+    const { assertLiteralMediaInput, findFfBinary } = await importFresh();
+    const [ffmpeg, ffprobe] = [findFfBinary("ffmpeg"), findFfBinary("ffprobe")];
+    if (!ffmpeg || !ffprobe) return;
+    const dir = mkdtempSync(join(tmpdir(), "hf-image2-stray-"));
+    onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
+    const still = (size: number, at: string) =>
+      spawnSync(ffmpeg, [
+        ...["-v", "error", "-y", "-f", "lavfi", "-i", `color=red:s=${size}x${size}`],
+        ...["-frames:v", "1", "-c:v", "png", "-f", "image2", "-update", "1", at],
+      ]);
+    const [small, big] = [join(dir, "small.png"), join(dir, "big.png")];
+    still(16, small);
+    still(32, big);
+    if (!existsSync(small) || !existsSync(big)) return;
+    const width = (path: string) =>
+      spawnSync(
+        ffprobe,
+        ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width"].concat([
+          "-of",
+          "csv=p=0",
+          "--",
+          path,
+        ]),
+        { encoding: "utf8" },
+      ).stdout.trim();
+    // Each name next to a decoy at the name cut at its "%", which is what ffmpeg opens when it misreads it.
+    const cases: Array<[string, string]> = [];
+    for (const wildcard of ["{", "*", "?", "["]) {
+      cases.push(
+        [`x%a${wildcard}y.png`, "x"],
+        [`x${wildcard}%ay.png`, `x${wildcard}`],
+        [`x%a/y${wildcard}.png`, "x"],
+        [`x${wildcard}/y%a.png`, `x${wildcard}/y`],
+        [`x%a${wildcard}.xface`, "x"],
+        [`x${wildcard}%.png`, `x${wildcard}`],
+      );
+    }
+    cases.push(["x%ay.png", "x"], ["clip 100% done.png", "clip 100"], ["x{y}.png", "x{y}"]);
+    const misread: string[] = [];
+    cases.forEach(([name, prefix], index) => {
+      const at = join(dir, `case${index}`);
+      const literal = join(at, name);
+      const decoy = join(at, prefix);
+      mkdirSync(dirname(literal), { recursive: true });
+      mkdirSync(dirname(decoy), { recursive: true });
+      if (decoy !== literal) copyFileSync(big, decoy);
+      copyFileSync(small, literal);
+      try {
+        assertLiteralMediaInput(literal);
+      } catch {
+        return;
+      }
+      if (width(literal) === "32") misread.push(name);
+    });
+    expect(misread).toEqual([]);
+  }, 60_000);
+});
+
 describe.skipIf(spawnSync("ffmpeg", ["-version"]).status !== 0)("concatListInputArgs", () => {
   it("refuses a listed entry that is not a local file", async () => {
     const { concatListInputArgs } = await importFresh();
@@ -639,5 +776,94 @@ describe.skipIf(spawnSync("ffmpeg", ["-version"]).status !== 0)("concatListInput
     );
     expect(run.status).not.toBe(0);
     expect(run.stderr).toContain("not on whitelist 'file'");
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "joins every clip under a folder whose name holds a tab, a quote and a #",
+    async () => {
+      const { concatListInputArgs, concatListText } = await importFresh();
+      const root = mkdtempSync(join(tmpdir(), "hf-concat-tab-"));
+      onTestFinished(() => rmSync(root, { recursive: true, force: true }));
+      const dir = join(root, "out\tit's #dir");
+      mkdirSync(dir);
+      const clips = ["a.mp4", "b.mp4"].map((name) => join(dir, name));
+      for (const clip of clips) {
+        const made = spawnSync("ffmpeg", [
+          "-v",
+          "error",
+          "-f",
+          "lavfi",
+          "-i",
+          "testsrc=size=64x64:rate=10",
+          "-frames:v",
+          "10",
+          "-c:v",
+          "mpeg4",
+          "-y",
+          clip,
+        ]);
+        expect(made.status).toBe(0);
+      }
+      const list = join(dir, "list.txt");
+      writeFileSync(list, concatListText(clips));
+      const out = join(dir, "joined.mp4");
+      const run = spawnSync(
+        "ffmpeg",
+        ["-v", "error", ...concatListInputArgs(list), "-c", "copy", "-y", out],
+        {
+          encoding: "utf8",
+        },
+      );
+      expect(run.stderr).toBe("");
+      const probe = spawnSync(
+        "ffprobe",
+        [
+          "-v",
+          "error",
+          "-count_packets",
+          "-select_streams",
+          "v",
+          "-show_entries",
+          "stream=nb_read_packets",
+          "-of",
+          "csv=p=0",
+          "--",
+          out,
+        ],
+        { encoding: "utf8" },
+      );
+      expect(probe.stdout.trim()).toBe("20");
+    },
+  );
+});
+
+describe("concatListText", () => {
+  // fails without the fix: every list writer escaped only the single quote, so a line break started a new list line.
+  it("writes one quoted entry per path and refuses a path holding a line break or NUL", async () => {
+    const { concatListText } = await importFresh();
+    expect(concatListText(["/a/it's.mp4", "/b/c.mp4"])).toBe(
+      "file '/a/it'\\''s.mp4'\nfile '/b/c.mp4'\n",
+    );
+    for (const path of ["/p\nfile '/etc/x.mov'\n#/c.mp4", "/p\r/c.mp4", "/p\u0000/c.mp4"]) {
+      expect(() => concatListText([path])).toThrow("line break or NUL");
+    }
+  });
+
+  it("places an entry given a duration that long after the one before, on its own timestamps", async () => {
+    const { concatListText } = await importFresh();
+    expect(concatListText([{ path: "/a/it's.mp4", durationSeconds: 15 }, "/b/c.mp4"])).toBe(
+      "file '/a/it'\\''s.mp4'\ninpoint 0\nduration 15\nfile '/b/c.mp4'\n",
+    );
+    expect(() => concatListText([{ path: "/p\n.mp4", durationSeconds: 1 }])).toThrow(
+      "line break or NUL",
+    );
+  });
+
+  // fails without the fix: a tab inside the quotes is read fine by ffmpeg, but the writer refused it.
+  it("keeps a tab or DEL in a path, which do not end a list line", async () => {
+    const { concatListText } = await importFresh();
+    expect(concatListText(["/out\tdir/c.mp4", "/p\u007f/c.mp4"])).toBe(
+      "file '/out\tdir/c.mp4'\nfile '/p\u007f/c.mp4'\n",
+    );
   });
 });

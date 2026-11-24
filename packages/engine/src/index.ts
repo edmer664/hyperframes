@@ -88,6 +88,7 @@ export {
   getSystemTotalMb,
   hostCpuCount,
   usableCpuCount,
+  cpuBudget,
   isLowMemorySystem,
   LOW_MEMORY_TOTAL_MB_THRESHOLD,
 } from "./services/systemMemory.js";
@@ -198,11 +199,12 @@ export {
 } from "./services/screenshotService.js";
 
 // ── Encoding ───────────────────────────────────────────────────────────────────
-export { concatListInputArgs } from "@hyperframes/parsers/ff-binaries";
+export { concatListInputArgs, concatListText } from "@hyperframes/parsers/ff-binaries";
 export {
   buildEncoderArgs,
   encodeFramesFromDir,
   buildConcatArgs,
+  writeVideoConcatList,
   concatVideoFiles,
   encodeFramesChunkedConcat,
   muxVideoWithAudio,
@@ -408,6 +410,7 @@ export {
   PROBE_FACTS_VERSION,
   buildProbeFactsText,
   probeMediaProfile,
+  isStructurallyIncompletePngError,
   runFfprobe,
   analyzeKeyframeIntervals,
   type VideoMetadata,
@@ -478,7 +481,11 @@ export {
   FFPROBE_PATH_ENV,
 } from "./utils/ffmpegBinaries.js";
 
-export { trackChildProcess, killTrackedProcesses } from "./utils/processTracker.js";
+export {
+  trackChildProcess,
+  killTrackedProcesses,
+  onTrackedChildProcess,
+} from "./utils/processTracker.js";
 export { renameWithRetry, renameWithRetryAsync } from "@hyperframes/core/rename-retry";
 export { removeScratch, collectScratchLeftovers } from "@hyperframes/core/remove-scratch";
 

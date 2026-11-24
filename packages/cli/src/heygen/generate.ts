@@ -2,7 +2,8 @@
 // from one photo, a voice, or music. Every call is priced first with --plan, keyed for idempotency, downloaded into
 // the project and recorded in the media ledger as generated.
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { replaceFileAtomically } from "@hyperframes/core/atomic-file";
 import { makeOutputFolder } from "../utils/outputFolder.js";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
@@ -16,7 +17,16 @@ import type {
   MusicCreateRequest,
 } from "../cloud/_gen/types.js";
 import { findCuts, signatures } from "../measure/cuts.js";
-import { Fix, probeVideo, projectOf, round, runFfmpeg, videoClip } from "../measure/media.js";
+import {
+  Fix,
+  ffmpegInput,
+  ffmpegToFile,
+  probeVideo,
+  projectOf,
+  round,
+  runFfmpeg,
+  videoClip,
+} from "../measure/media.js";
 import { loadSharp } from "../utils/optionalPackages.js";
 import {
   chargedCredits,
@@ -169,7 +179,6 @@ const DEFAULTS = {
   music: "lyria-3-pro",
 } as const;
 export const VENDOR_PRICED_IMAGES = new Set([
-  "gpt-image-2.5",
   "gpt-image-2.6",
   "gpt-image-2.6-flare",
   "minimax-h3-image",
@@ -180,13 +189,15 @@ const GEMINI_ASPECTS = [...GPT_ASPECTS, "3:2", "2:3", "21:9"];
 const MINIMAX_ASPECTS = [...GPT_ASPECTS, "21:9"];
 /** What /v3/images accepts from each model: its aspect ratios and how many reference pictures. */
 const IMAGE_MODELS: Record<string, { aspects: string[]; references: number }> = {
-  "nano-banana-2": { aspects: GEMINI_ASPECTS, references: 14 },
   "nano-banana-2.1": { aspects: GEMINI_ASPECTS, references: 14 },
-  "gpt-image-2.5": { aspects: GPT_ASPECTS, references: 16 },
   "gpt-image-2.6": { aspects: GPT_ASPECTS, references: 16 },
   "gpt-image-2.6-flare": { aspects: GPT_ASPECTS, references: 16 },
   "minimax-h3-image": { aspects: MINIMAX_ASPECTS, references: 16 },
   "minimax-h3-image-4k": { aspects: MINIMAX_ASPECTS, references: 16 },
+};
+const RETIRED_IMAGE_MODELS: Record<string, string> = {
+  "nano-banana-2": "nano-banana-2.1",
+  "gpt-image-2.5": "gpt-image-2.6",
 };
 export const isVendorPriced = (r: GenerateRequest): boolean =>
   r.type === "image" && VENDOR_PRICED_IMAGES.has(r.model ?? "");
@@ -201,9 +212,14 @@ const need = <T>(value: T | undefined, flag: string, example: string): T => {
   return value;
 };
 
+const ownEntry = <T>(table: Record<string, T>, name: string): T | undefined =>
+  Object.hasOwn(table, name) ? table[name] : undefined;
+
 function imageModel(r: GenerateRequest): string {
   const model = r.model ?? DEFAULTS.image;
-  const spec = IMAGE_MODELS[model];
+  const replacement = ownEntry(RETIRED_IMAGE_MODELS, model);
+  if (replacement) throw new Fix(`${model} is no longer offered here`, `--model ${replacement}`);
+  const spec = ownEntry(IMAGE_MODELS, model);
   if (!spec) return model;
   if (r.aspect && !spec.aspects.includes(r.aspect))
     throw new Fix(`${model} does not make ${r.aspect}`, `--aspect ${spec.aspects.join("|")}`);
@@ -402,7 +418,7 @@ async function shrunk(paths: string[], work: string): Promise<Map<string, string
     needFile(path);
     const to = join(work, `picture-${out.size}.jpg`);
     const viaFfmpeg = () =>
-      runFfmpeg(["-y", "-i", path, "-vf", FIT_2048, "-q:v", "3", "-frames:v", "1", to]);
+      runFfmpeg(["-y", ...ffmpegInput(path), "-vf", FIT_2048, "-q:v", "3", "-frames:v", "1", to]);
     if (!sharp) viaFfmpeg();
     else
       await sharp(path)
@@ -428,13 +444,16 @@ function inline(work: string, pictures: Map<string, string>, masks: Mask[] = [])
             `in-${Math.random().toString(36).slice(2)}.${{ audio: "mp3", video: "mp4" }[kind]}`,
           );
     if (kind === "audio")
-      runFfmpeg(["-y", "-i", path, "-vn", "-ac", "1", "-c:a", "libmp3lame", "-b:a", "128k", out]);
+      runFfmpeg([
+        ...["-y", ...ffmpegInput(path), "-vn", "-ac", "1"],
+        ...["-c:a", "libmp3lame", "-b:a", "128k", out],
+      ]);
     // A guide clip only needs its motion: 720 px on the long side, no sound, at most 15 s.
     else if (kind === "video") {
-      const guide = masks.length ? fillMasks(path, masks, work) : path;
+      const guide = masks.length ? ["-i", fillMasks(path, masks, work)] : ffmpegInput(path);
       const scale = "scale='if(gt(iw,ih),min(720,iw),-2)':'if(gt(iw,ih),-2,min(720,ih))'";
       runFfmpeg([
-        ...["-y", "-i", guide, "-t", "15", "-an", "-vf", scale],
+        ...["-y", ...guide, "-t", "15", "-an", "-vf", scale],
         ...["-c:v", "libx264", "-crf", "28", "-preset", "veryfast", "-pix_fmt", "yuv420p", out],
       ]);
     }
@@ -510,7 +529,7 @@ function structured(clip: string, guide: { width: number; height: number }, mask
 /** The masks whose surroundings change, where the camera moves: a median over time would freeze old frames in them. */
 function staleMasks(path: string, { width, height }: Size, masks: Mask[]): Mask[] {
   const gray = runFfmpeg([
-    ...["-t", String(GUIDE_MAX_S), "-i", path],
+    ...["-t", String(GUIDE_MAX_S), ...ffmpegInput(path)],
     ...["-vf", "fps=2", "-pix_fmt", "gray", "-f", "rawvideo", "-"],
   ]);
   const frame = (i: number) => gray.subarray(i * width * height, (i + 1) * width * height);
@@ -527,22 +546,22 @@ function staleMasks(path: string, { width, height }: Size, masks: Mask[]): Mask[
 function fillMasks(path: string, masks: Mask[], work: string): string {
   const info = probeVideo(path);
   const stale = staleMasks(path, info, masks);
-  const encode = (from: string, name: string, filter: string[]) => {
+  const encode = (input: string[], name: string, filter: string[]) => {
     const out = join(work, name);
     runFfmpeg([
-      ...["-y", "-i", from, "-an"],
+      ...["-y", ...input, "-an"],
       ...filter,
       ...["-crf", "14", "-pix_fmt", "yuv420p", out],
     ]);
     return out;
   };
-  const median = encode(path, "median.mp4", [
+  const median = encode(ffmpegInput(path), "median.mp4", [
     ...["-t", "15", "-filter_complex", maskFilters(masks, info.fps, stale)],
     ...["-map", `[v${masks.length}]`],
   ]);
   const left = structured(median, info, masks).map((s) => s.mask);
   if (!left.length) return median;
-  return encode(median, "filled.mp4", [
+  return encode(["-i", median], "filled.mp4", [
     ...["-filter_complex", maskFilters(left, info.fps, left)],
     ...["-map", `[v${left.length}]`],
   ]);
@@ -561,24 +580,13 @@ function fitAspect(out: string, aspect: string): string | undefined {
   const even = (n: number) => n - (n % 2);
   const [w, h] =
     width / height > want ? [even(height * want), height] : [width, even(width / want)];
-  const fitted = `${out}.fit${extname(out)}`;
-  runFfmpeg([
-    ...[
-      "-y",
-      "-i",
-      out,
-      "-vf",
-      `crop=${w}:${h}`,
-      "-c:v",
-      "libx264",
-      "-crf",
-      "12",
-      "-preset",
-      "slow",
+  ffmpegToFile(
+    [
+      ...["-y", "-i", out, "-vf", `crop=${w}:${h}`, "-c:v", "libx264", "-crf", "12"],
+      ...["-preset", "slow", "-pix_fmt", "yuv420p", "-c:a", "copy"],
     ],
-    ...["-pix_fmt", "yuv420p", "-c:a", "copy", fitted],
-  ]);
-  renameSync(fitted, out);
+    out,
+  );
   return `HeyGen returned ${width}x${height} for ${aspect}; cropped to ${w}x${h} (centre), not stretched`;
 }
 
@@ -750,7 +758,7 @@ export async function generate(
         `could not download the result (${res.status})`,
         "run the same command again; it re-reads the job",
       );
-    writeFileSync(out, Buffer.from(await res.arrayBuffer()));
+    replaceFileAtomically(out, Buffer.from(await res.arrayBuffer()));
     const charged = chargedCredits(job);
     // HeyGen sometimes cuts inside a shot on its own; the shot is paid for and kept, the cuts are reported.
     let cuts: number[] | null | undefined;

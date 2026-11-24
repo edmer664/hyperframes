@@ -1,3 +1,4 @@
+import { vcsOrSecret, credentialOrToolState } from "./privatePathRules.js";
 import { realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
@@ -34,9 +35,7 @@ function withoutTrailingDotsOrSpaces(segment: string): string {
 
 // Git metadata and env files hold commands other tools run and secrets: nothing serves or inlines them.
 export function isVcsOrSecretPath(relPath: string): boolean {
-  return projectPathSegments(relPath).some(
-    (segment) => segment === ".git" || segment.startsWith(".env"),
-  );
+  return vcsOrSecret.test(projectPathSegments(relPath).join("/"));
 }
 
 // `.hyperframes/` holds the desktop app's and the CLI's own records (a hand-off, chat history, read marks): no file
@@ -51,57 +50,9 @@ const UNCONVERTED_PREVIEW_DOWNLOADS = ".hyperframes/prepared-assets/downloads";
 
 // Credentials and coding-tool state that projects often sit next to: registry tokens, MCP and agent settings, cloud and
 // SSH keys. No composition loads one, so no file server serves one and no upload ships one.
-const CREDENTIAL_FILES = new Set([
-  ".npmrc",
-  ".yarnrc",
-  ".yarnrc.yml",
-  ".pypirc",
-  "pip.conf",
-  "pip.ini",
-  ".netrc",
-  "_netrc",
-  ".git-credentials",
-  ".gitconfig",
-  ".mcp.json",
-  "credentials.json",
-  "serviceaccountkey.json",
-  "service-account.json",
-  "service_account.json",
-]);
-const CREDENTIAL_FOLDERS = new Set([
-  ".ssh",
-  ".aws",
-  ".gnupg",
-  ".docker",
-  ".kube",
-  ".azure",
-  ".claude",
-  ".codex",
-  ".cursor",
-  ".agents",
-  ".gemini",
-  ".vscode",
-  ".idea",
-]);
-const CREDENTIAL_CONFIG_FOLDERS = new Set(["gcloud", "gh"]);
-const KEY_FILE =
-  /^(?:id_(?:rsa|dsa|ecdsa|ed25519).*|.*\.(?:pem|key|p12|pfx|p8|ppk|jks|keystore|kdbx))$/;
-const SECRET_STORE_FILE = /\.(?:tfstate(?:\.backup)?|tfvars(?:\.json)?)$/;
-
 /** Credential files and tool or agent state, for a project-relative path in any spelling Windows opens. */
 export function isCredentialOrToolStatePath(relPath: string): boolean {
-  const segments = projectPathSegments(relPath);
-  const name = segments.at(-1) ?? "";
-  return (
-    CREDENTIAL_FILES.has(name) ||
-    KEY_FILE.test(name) ||
-    SECRET_STORE_FILE.test(name) ||
-    segments.some(
-      (segment, at) =>
-        CREDENTIAL_FOLDERS.has(segment) ||
-        (segment === ".config" && CREDENTIAL_CONFIG_FOLDERS.has(segments[at + 1] ?? "")),
-    )
-  );
+  return credentialOrToolState.test(projectPathSegments(relPath).join("/"));
 }
 
 /** Files no composition loads, in any spelling Windows opens: git, env, credentials, tool state, app records. */

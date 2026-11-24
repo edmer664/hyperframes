@@ -19,15 +19,26 @@ const nullableNumber = (value: unknown): value is number | null =>
   value === null || (typeof value === "number" && Number.isFinite(value));
 export const isAudience = (value: unknown): value is LocalShareAudience =>
   audiences.some((mode) => mode === value);
+function isReviewNamed(value: Record<string, unknown>) {
+  return (
+    nullableText(value.url) &&
+    text(value.manageUrl) &&
+    nullableText(value.reviewId) &&
+    nullableText(value.reviewTitle)
+  );
+}
+function optionalPaths(value: unknown): value is string[] | undefined {
+  return value === undefined || (Array.isArray(value) && value.every(text));
+}
 function isState(value: unknown): value is LocalShareState {
   return (
     record(value) &&
     ["not_shared", "link_off", "ready", "processing", "failed", "unavailable"].includes(
       String(value.state),
     ) &&
+    optionalPaths(value.excludedPrivatePaths) &&
     optionalFailure(value.failure) &&
-    nullableText(value.url) &&
-    text(value.manageUrl) &&
+    isReviewNamed(value) &&
     nullableBoolean(value.changed) &&
     nullableAudience(value.audience) &&
     nullableText(value.spaceId) &&

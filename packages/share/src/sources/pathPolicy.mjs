@@ -1,5 +1,7 @@
 // @ts-check
 // Validate source manifests against the bundled sync contract.
+import { isPrivateSourcePath, privateSourceSpelling } from "./privateSource.mjs";
+export { isPrivateSourcePath };
 import { readContract } from "./contract.mjs";
 import { UNICODE_VERSION, allAssigned, comparisonKey, nfc, withoutIgnorable } from "./unicode.mjs";
 
@@ -94,10 +96,16 @@ const policy = () => (compiled ??= compile(readContract("path-policy.json")));
 /** Every segment replaced by its comparison key. @param {string} path */
 const foldedPath = (path) => path.split("/").map(comparisonKey).join("/");
 
+/** @param {{ pattern: RegExp, rule: PathRule }} entry @param {string} folded @param {string} path */
+const matches = ({ pattern, rule }, folded, path) =>
+  pattern.test(folded) ||
+  ((rule.id === "private-source" || rule.id === "unrecognized-hidden") &&
+    pattern.test(privateSourceSpelling(path)));
+
 /** The first rule matching a path's folded spelling. @param {string} path @returns {PathRule} */
 export function classifyPath(path) {
   const folded = foldedPath(path);
-  const found = policy().rules.find(({ pattern }) => pattern.test(folded));
+  const found = policy().rules.find((entry) => matches(entry, folded, path));
   if (!found) throw new Error("the path policy's catch-all rule did not match");
   return found.rule;
 }
@@ -154,7 +162,7 @@ export function validatePath(path, stored = false) {
   if (root !== undefined && segments[0] !== root)
     throw new PathViolation("reserved_path_alias", path);
   const folded = keys.join("/");
-  const found = rules.find(({ pattern }) => pattern.test(folded));
+  const found = rules.find((entry) => matches(entry, folded, path));
   if (!found) throw new Error("the path policy's catch-all rule did not match");
   if (found.rule.server_action === "reject")
     throw new PathViolation("excluded_path", path, found.rule.id);
@@ -219,7 +227,10 @@ export function excludedFolder(dir) {
   const folded = foldedPath(dir);
   const at = policy().rules.findIndex(
     ({ pattern, rule }) =>
-      rule.client_action !== "include" && pattern.test(folded) && pattern.test(`${folded}/x`),
+      rule.id !== "unrecognized-hidden" &&
+      rule.client_action !== "include" &&
+      pattern.test(folded) &&
+      pattern.test(`${folded}/x`),
   );
   if (at < 0) return false;
   return policy()
@@ -231,11 +242,14 @@ export function excludedFolder(dir) {
     });
 }
 
-/** Whether a segment of `path` is a Windows short name of a name the current policy refuses. @param {string} path */
-const hasShortNameAlias = (path) =>
-  path.split("/").some((segment) => isShortNameAlias(comparisonKey(segment)));
-
-/** Whether the current policy lets `path` reach a disk: a rule includes it and no segment is a current short name,
- * which a stored read, holding the older names, may still list. @param {string} path */
-export const travels = (path) =>
-  classifyPath(path).client_action === "include" && !hasShortNameAlias(path);
+/** A stored manifest may contain paths that are no longer eligible for upload. @param {string} path */
+export function canUploadStoredPath(path) {
+  if (isPrivateSourcePath(path)) return false;
+  try {
+    validatePath(path);
+    return true;
+  } catch (error) {
+    if (error instanceof PathViolation) return false;
+    throw error;
+  }
+}

@@ -15,6 +15,7 @@ import {
   checkInventoryPaths,
   classifyPath,
   excludedFolder,
+  isPrivateSourcePath,
   prefiltered,
   skippedSymlink,
   validatePath,
@@ -28,9 +29,16 @@ import { readRenderOutputs, settledState } from "./projectState.mjs";
 const INLINE_HASH_BYTES = 4 * 1024 * 1024;
 const HASHING_AT_ONCE = 4;
 
+/** Test a child of a directory so a file-only rule does not prune a folder of the same name.
+ * @param {string} rel @param {boolean} directory */
+function isPrivateEntry(rel, directory) {
+  return isPrivateSourcePath(directory ? `${rel}/x` : rel);
+}
+
 /** @param {string} root @param {string} rel @param {import("node:fs").Dirent} entry @param {Walk} walk
  * @param {string[]} dirs */
 async function visit(root, rel, entry, walk, dirs) {
+  if (isPrivateEntry(rel, entry.isDirectory())) return void walk.excludedPrivatePaths.push(rel);
   if (entry.isDirectory()) {
     if (!excludedFolder(rel)) dirs.push(rel);
     return;
@@ -83,7 +91,7 @@ async function listFolder(root, dir) {
  * @param {(rel: string) => boolean} renderOutput @returns {Promise<Walk>} */
 async function walkProject(root, renderOutput) {
   /** @type {Walk} */
-  const walk = { files: [], problems: [], waiting: [], skippedLinks: [] };
+  const walk = { files: [], problems: [], waiting: [], skippedLinks: [], excludedPrivatePaths: [] };
   const ignored = await readSourceIgnore(root);
   const dirs = [""];
   for (let dir = dirs.pop(); dir !== undefined; dir = dirs.pop()) {
@@ -245,6 +253,7 @@ export async function captureProject(root, { memo = hashMemo(), limits = V1_LIMI
       settled,
       waiting: walk.waiting,
       skippedLinks: walk.skippedLinks,
+      excludedPrivatePaths: walk.excludedPrivatePaths.sort(),
     };
   } catch (error) {
     if (!(error instanceof ManifestInvalid)) throw error;

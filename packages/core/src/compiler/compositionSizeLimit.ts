@@ -1,22 +1,18 @@
 import { statSync } from "node:fs";
+import { MAX_COMPOSITION_HTML_BYTES, MAX_EXPANDED_COMPOSITION_BYTES } from "@hyperframes/lint";
+import { terminalText } from "../terminalText";
 
-/**
- * The largest entry or sub-composition HTML file a render compiles. Compiling and probing a page
- * runs on the render server's main thread, and their cost grows with the page's size, so one huge
- * page would hold up every other render in the same process.
- */
-export const MAX_COMPOSITION_HTML_BYTES = 16 * 1024 * 1024;
+export { MAX_COMPOSITION_HTML_BYTES, MAX_EXPANDED_COMPOSITION_BYTES };
 
 const COMPOSITION_TOO_LARGE = "COMPOSITION_TOO_LARGE" as const;
 
 const megabytes = (bytes: number) => `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 
-/**
- * What one render may inline across every sub-composition mount. Each file is checked on its own
- * above, but a few small files that mount each other many times assemble a page far larger.
- */
-export const MAX_EXPANDED_COMPOSITION_BYTES = 2 * MAX_COMPOSITION_HTML_BYTES;
+const quotedForTerminalAndLogs = (file: string) => `"${terminalText(file)}"`;
+
 const MAX_COMPOSITION_MOUNTS = 10_000;
+/** About 4x the largest composition in 7 days of production renders (24,800 elements). */
+export const MAX_EXPANDED_ELEMENTS = 100_000;
 
 class CompositionTooLargeError extends Error {
   readonly code = COMPOSITION_TOO_LARGE;
@@ -30,7 +26,9 @@ class CompositionTooLargeError extends Error {
       bytes: number;
       limitBytes: number;
       mounts?: number;
-      exceeded?: "bytes" | "mounts" | "generated";
+      elements?: number;
+      limitElements?: number;
+      exceeded?: "bytes" | "mounts" | "generated" | "elements";
     }>,
   ) {
     super(message);
@@ -38,9 +36,13 @@ class CompositionTooLargeError extends Error {
   }
 }
 
+export function isCompositionTooLargeError(error: unknown): error is Error {
+  return error instanceof Error && "code" in error && error.code === COMPOSITION_TOO_LARGE;
+}
+
 const fileTooLarge = (file: string, bytes: number) =>
   new CompositionTooLargeError(
-    `Composition file "${file}" is ${megabytes(bytes)}, over the ` +
+    `Composition file ${quotedForTerminalAndLogs(file)} is ${megabytes(bytes)}, over the ` +
       `${megabytes(MAX_COMPOSITION_HTML_BYTES)} limit for one composition HTML file. ` +
       "Keep large data such as images, fonts and JSON in separate asset files and reference " +
       "them by path instead of inlining them.",
@@ -51,6 +53,9 @@ const limitText = `One render generates at most ${megabytes(MAX_EXPANDED_COMPOSI
 
 export const REMOTE_SCRIPTS = "remote scripts";
 export const REMOTE_STYLESHEETS = "remote stylesheets";
+export const LOCAL_SCRIPTS = "local scripts";
+export const LOCAL_STYLESHEETS = "local stylesheets";
+export const ENTRY_PAGE = "the entry page";
 
 function generatedTooLarge(file: string, bytes: number): string {
   if (file === "composition variables") {
@@ -65,6 +70,18 @@ function generatedTooLarge(file: string, bytes: number): string {
       "Use shorter URLs or bind fewer elements."
     );
   }
+  if (file === LOCAL_SCRIPTS) {
+    return (
+      `Local scripts copied into their tags add up to ${megabytes(bytes)}. ${limitText}. ` +
+      "Name each script file in one tag."
+    );
+  }
+  if (file === LOCAL_STYLESHEETS) {
+    return (
+      `Local stylesheets copied into the page add up to ${megabytes(bytes)}. ${limitText}. ` +
+      "Link each stylesheet once and import each file once."
+    );
+  }
   if (file === REMOTE_SCRIPTS || file === REMOTE_STYLESHEETS) {
     return (
       `Inlined ${file} add up to ${megabytes(bytes)}. ${limitText}. ` +
@@ -72,7 +89,7 @@ function generatedTooLarge(file: string, bytes: number): string {
     );
   }
   return (
-    `Scripts, styles and rebased asset paths generated for compositions, ending at "${file}", add up to ` +
+    `Scripts, styles and rebased asset paths generated for compositions, ending at ${quotedForTerminalAndLogs(file)}, add up to ` +
     `${megabytes(bytes)}. One render generates at most ` +
     `${megabytes(MAX_EXPANDED_COMPOSITION_BYTES)} for its mounts. Merge small inline scripts ` +
     "and style rules, keep data-composition-id values short, or mount scenes fewer times."
@@ -84,6 +101,25 @@ export class CompositionExpansionBudget {
   private bytes = 0;
   private mounts = 0;
   private generated = 0;
+  private elements = 0;
+
+  chargeElements(file: string, count: number): void {
+    this.elements += count;
+    if (this.elements <= MAX_EXPANDED_ELEMENTS) return;
+    throw new CompositionTooLargeError(
+      (file === ENTRY_PAGE
+        ? `The entry page holds ${this.elements} elements. `
+        : `Sub-composition mounts, ending at ${quotedForTerminalAndLogs(file)}, add up to ${this.elements} elements. `) +
+        `One render inlines at most ${MAX_EXPANDED_ELEMENTS} elements. Mount large or repeated scenes fewer times.`,
+      {
+        bytes: this.bytes,
+        limitBytes: MAX_EXPANDED_COMPOSITION_BYTES,
+        elements: this.elements,
+        limitElements: MAX_EXPANDED_ELEMENTS,
+        exceeded: "elements",
+      },
+    );
+  }
 
   /** `bytes` may be negative when a reserved upper bound is settled to the real size. */
   chargeGenerated(file: string, bytes: number): void {
@@ -94,6 +130,10 @@ export class CompositionExpansionBudget {
       limitBytes: MAX_EXPANDED_COMPOSITION_BYTES,
       exceeded: "generated",
     });
+  }
+
+  get generatedRoom(): number {
+    return MAX_EXPANDED_COMPOSITION_BYTES - this.generated;
   }
 
   chargeGeneratedIfItFits(bytes: number): boolean {
@@ -109,7 +149,7 @@ export class CompositionExpansionBudget {
       return;
     }
     throw new CompositionTooLargeError(
-      `Sub-composition mounts, ending at "${file}", add up to ${megabytes(this.bytes)} ` +
+      `Sub-composition mounts, ending at ${quotedForTerminalAndLogs(file)}, add up to ${megabytes(this.bytes)} ` +
         `across ${this.mounts} mounts. One render inlines at most ` +
         `${megabytes(MAX_EXPANDED_COMPOSITION_BYTES)} of composition HTML in at most ` +
         `${MAX_COMPOSITION_MOUNTS} mounts. Mount large or repeated scenes fewer times.`,

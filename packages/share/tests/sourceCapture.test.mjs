@@ -35,6 +35,19 @@ function captured(capture) {
   return /** @type {Extract<typeof capture, { at: "captured" }>} */ (capture);
 }
 
+test("a private directory and a symlink with the same name are reported by entry name", async (t) => {
+  const root = await project({ "index.html": "project", "actual/.ssh/config": "fixture" });
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "linked"));
+  await symlink(join(root, "actual/.ssh"), join(root, "linked/.ssh"), "dir");
+  const result = captured(await captureProject(root));
+  assert.deepEqual(result.excludedPrivatePaths, ["actual/.ssh", "linked/.ssh"]);
+  assert.deepEqual(
+    result.manifest.document.files.map((file) => file.path),
+    ["index.html"],
+  );
+});
+
 test("a capture lists portable files with their hashes and leaves out what the policy excludes", async () => {
   const root = await project({
     "index.html": "<html></html>",
@@ -330,7 +343,7 @@ test("scratch files and wildcard exclusions do not change the snapshot", async (
   assert.notEqual(await projectFingerprint(root), before);
 });
 
-test("editable source omits credential stores while Keynote, media and ordinary config files travel", async (t) => {
+test("editable source omits credential stores and unrecognized hidden files while completed media travels", async (t) => {
   const root = await project({
     "index.html": "page",
     ".config/gh/hosts.yml": "fixture",
@@ -346,7 +359,7 @@ test("editable source omits credential stores while Keynote, media and ordinary 
   t.after(() => rm(root, { recursive: true, force: true }));
   assert.deepEqual(
     captured(await captureProject(root)).manifest.document.files.map(({ path }) => path),
-    [".config/themes/colors.json", ".media/video/clip.mp4", "assets/deck.key", "index.html"],
+    [".media/video/clip.mp4", "index.html"],
   );
   await symlink(".config/gh/hosts.yml", join(root, "notes.txt"));
   assert.deepEqual(await captureProject(root), {

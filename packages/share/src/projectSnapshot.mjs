@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import { isOutsideFilm } from "./appOwnedPaths.mjs";
 
 export { readSourceIgnore };
+export { isPrivateSourcePath, privateSourceSpelling } from "./sources/privateSource.mjs";
 
 export const HF_ID_ATTRIBUTE = /\sdata-hf-id\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/g;
 

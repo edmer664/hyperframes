@@ -2,7 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { NotWritable, uploadNeeded } from "./uploadFiles.mjs";
-import { travels } from "./pathPolicy.mjs";
+import { canUploadStoredPath } from "./pathPolicy.mjs";
 import { parseStoredManifest } from "./manifest.mjs";
 import { SyncApiError } from "./errors.mjs";
 
@@ -133,7 +133,7 @@ export async function recoverSourceUpload(job) {
   const manifest = parseStoredManifest(saved.manifest);
   if (manifest.sha256 !== saved.manifestSha256)
     throw new Error("Saved source upload manifest does not match its checksum.");
-  if (!saved.uploadId && manifest.document.files.some(({ path }) => !travels(path))) {
+  if (!saved.uploadId && manifest.document.files.some(({ path }) => !canUploadStoredPath(path))) {
     await clearIntent(job);
     return null;
   }

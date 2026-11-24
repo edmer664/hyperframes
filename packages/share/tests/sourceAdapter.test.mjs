@@ -29,7 +29,10 @@ async function fixture(t, files = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "hf-source-test-")));
   t.after(() => rm(root, { recursive: true, force: true }));
   await writeFile(join(root, "index.html"), "<html>video</html>");
-  for (const [file, content] of Object.entries(files)) await writeFile(join(root, file), content);
+  for (const [file, content] of Object.entries(files)) {
+    await mkdir(dirname(join(root, file)), { recursive: true });
+    await writeFile(join(root, file), content);
+  }
   const rendered = await projectFingerprint(root);
   const store = createProjectShareSourceStore();
   return {
@@ -164,6 +167,88 @@ test("source upload verifies before attachment and a fresh adapter reuses the ex
   const binding = await f.store.read(f.key);
   assert.equal(binding.inflight, null);
   assert.equal(binding.base.snapshotId, "snapshot");
+});
+
+test("source preparation omits and reports private files and whole private folders at any depth", async (t) => {
+  const names = [
+    ".git/config",
+    ".env-production",
+    ".npmrc",
+    ".yarnrc",
+    ".yarnrc.yml",
+    ".pypirc",
+    "pip.conf",
+    "pip.ini",
+    ".netrc",
+    "_netrc",
+    ".git-credentials",
+    ".gitconfig",
+    ".mcp.json",
+    "credentials.json",
+    "serviceaccountkey.json",
+    "service-account.json",
+    "service_account.json",
+    "id_rsa",
+    "id_dsa.old",
+    "id_ecdsa",
+    "id_ed25519",
+    "file.pem",
+    "file.key",
+    "file.p12",
+    "file.pfx",
+    "file.p8",
+    "file.ppk",
+    "file.jks",
+    "file.keystore",
+    "file.kdbx",
+    "terraform.tfstate",
+    "terraform.tfstate.backup",
+    "dev.tfvars",
+    "dev.tfvars.json",
+    "mixed/SERVICE-ACCOUNT.JSON",
+    ".ssh/config",
+    ".aws/config",
+    ".gnupg/state",
+    ".docker/config",
+    ".kube/config",
+    ".azure/state",
+    ".claude/state",
+    ".codex/state",
+    ".cursor/state",
+    ".agents/state",
+    ".gemini/state",
+    ".vscode/state",
+    ".idea/state",
+    ".config/gh/state",
+    ".config/gcloud/state",
+  ];
+  const paths = names.flatMap((name) => [name, `nested/${name}`]);
+  const f = await fixture(t, {
+    ...Object.fromEntries(paths.map((path) => [path, "omitted fixture"])),
+    ".media/cover.png": "art",
+    "nested/project.json": "{}",
+  });
+  const server = fakeServer();
+  const source = shareSources({ access: async () => signed, spaceId: "personal", ...server });
+  const result = await source.prepare(f.root, f.rendered);
+  assert.equal(result.at, "ready");
+  assert.deepEqual(
+    server.calls.begin[0].manifest.document.files.map((file) => file.path),
+    [".media/cover.png", "index.html", "nested/project.json"],
+  );
+  assert.deepEqual(server.calls.puts.map((bytes) => bytes.toString()).sort(), [
+    "<html>video</html>",
+    "art",
+    "{}",
+  ]);
+  for (const path of paths)
+    assert.ok(
+      result.excludedPrivatePaths.some(
+        (excluded) => path === excluded || path.startsWith(`${excluded}/`),
+      ),
+      path,
+    );
+  assert.deepEqual(await source.filesForExport(f.root, f.rendered), result.snapshot);
 });
 
 test("changed assets invalidate prepared source even when the HTML render fingerprint stays unchanged", async (t) => {

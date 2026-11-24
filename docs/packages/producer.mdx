@@ -190,6 +190,22 @@ await executeRenderJob(
 An aborted render throws `RenderCancelledError`. Correctness warnings can also
 block a render when `strictness: "strict"` is enabled.
 
+## Remote scripts and stylesheets
+
+Before rendering, the producer downloads a composition's remote `<script src>` files and
+its stylesheets from hosts other than Google Fonts, and inlines them so the render needs
+no network for them. One compile downloads at most 32 distinct script addresses and 32
+distinct stylesheet addresses. A composition that links more of either is refused before
+any of that kind is downloaded, with an error that names the count. Stylesheets count
+before their contents are read, so a sheet with only layout rules counts too. Google Fonts
+links are handled by the font step and do not count. A script the host ships itself (GSAP,
+when `HYPERFRAMES_GSAP_VENDOR_DIR` names its folder) counts only when a tag's integrity
+metadata does not match that copy and it has to be downloaded.
+
+These downloads share one 60-second window, which starts with the first of them.
+Anything still pending then fails like an unreachable file, and its tag stays as written.
+Font files and other assets keep their own per-request time limits.
+
 ## Build a render service
 
 The package exports a Hono application and server helpers:
@@ -213,7 +229,7 @@ except `/health` then requires `Authorization: Bearer <token>`, and the server r
 start without one. A request's `projectDir` must resolve, symlinks included, inside
 `projectsDir` (`PRODUCER_PROJECTS_DIR`, default: the working directory). Its `entryFile`
 must stay inside that project, and `outputPath` must be inside `rendersDir`
-(`PRODUCER_RENDERS_DIR`, default `/tmp`). `debug: true` is refused unless you set
+(`PRODUCER_RENDERS_DIR`, default: a new private folder in the OS temp dir). `debug: true` is refused unless you set
 `allowDebug` or `PRODUCER_ALLOW_DEBUG=1`. `createProducerApp` applies these path and
 debug checks by default. `createRenderHandlers`, for mounting the handlers inside your own
 trusted service, applies them only with `confineRequests: true`.
